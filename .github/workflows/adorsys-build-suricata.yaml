@@ -31,13 +31,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Determine version & source URL from tag
-        run: |
-          VER="${GITHUB_REF_NAME#v}"
-          echo "VER=$VER" >> $GITHUB_ENV
-          echo "TARBALL=suricata-$VER.tar.gz" >> $GITHUB_ENV
-          echo "SRC_URL=https://www.openinfosecfoundation.org/download/suricata-$VER.tar.gz" >> $GITHUB_ENV
-
       - name: Install build deps (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -57,13 +50,7 @@ jobs:
           # Brew provides the needed libs/tools; libpcap is available via macOS/brew
           brew install autoconf automake libtool pkg-config jansson libmagic libyaml pcre2 libpcap lz4 rust cbindgen
 
-      - name: Download Suricata source
-        run: |
-          curl -L -o "$TARBALL" "$SRC_URL"
-          tar xzf "$TARBALL"
-
       - name: Configure & build
-        working-directory: suricata-${{ env.VER }}
         run: |
           ./configure \
             --disable-gccmarch-native \
@@ -73,7 +60,6 @@ jobs:
           make -j"$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)"
 
       - name: Stage install & package tarball
-        working-directory: suricata-${{ env.VER }}
         run: |
           DEST="$PWD/stage"
           make DESTDIR="$DEST" install
