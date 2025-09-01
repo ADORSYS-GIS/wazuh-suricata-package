@@ -75,7 +75,7 @@ jobs:
           sudo apt-get install -y \
             autoconf automake build-essential cargo cbindgen \
             libjansson-dev libpcap-dev libpcre2-dev libtool libyaml-dev \
-            make pkg-config rustc zlib1g-dev file liblz4-dev
+            make pkg-config gcc g++ rustc zlib1g-dev file liblz4-dev
           # Optional: Hyperscan (x86_64 only)
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             sudo apt-get install -y libhyperscan-dev || true
@@ -86,6 +86,13 @@ jobs:
         run: |
           brew update
           brew install autoconf automake libtool pkg-config jansson libmagic libyaml pkg-config pcre2 libpcap lz4 rust cbindgen
+          BREW_PREFIX="$(brew --prefix)"
+          {
+            echo "PATH=$BREW_PREFIX/bin:$PATH"
+            echo "PKG_CONFIG_PATH=$BREW_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+            echo "LDFLAGS=-L$BREW_PREFIX/lib $LDFLAGS"
+            echo "CPPFLAGS=-I$BREW_PREFIX/include $CPPFLAGS"
+          } >> $GITHUB_ENV
 
       # ---------- Versioning ----------
       - name: Determine version string
@@ -146,6 +153,12 @@ jobs:
           path: suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz
           if-no-files-found: error
 
+      - name: Dump config.log on failure
+        if: failure()
+        run: |
+          (test -f config.log && sed -n '1,200p' config.log) || true
+          find . -name config.log -maxdepth 2 -print -exec sed -n '1,120p' {} \;
+          
   release:
     needs: build
     runs-on: ubuntu-latest
