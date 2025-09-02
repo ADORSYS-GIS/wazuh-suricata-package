@@ -7,7 +7,8 @@ on:
   pull_request:
 
 permissions:
-  contents: write  # needed to publish Releases
+  contents: write
+  id-token: write   # needed for cosign keyless
 
 jobs:
   build:
@@ -32,26 +33,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # needed for git describe & submodules
+          fetch-depth: 0
           submodules: false
 
       - name: Init submodules
         run: git submodule update --init --recursive
 
-      # ---------- Optional caches ----------
-      - name: Set up ccache (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ccache
-          echo "CC='ccache gcc'" >> $GITHUB_ENV
-          echo "CXX='ccache g++'" >> $GITHUB_ENV
-
+      # -------- caches --------
       - name: Restore ccache cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.ccache
+          path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ matrix.arch }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.arch }}-
@@ -75,7 +67,8 @@ jobs:
           sudo apt-get install -y \
             autoconf automake build-essential cargo cbindgen \
             libjansson-dev libpcap-dev libpcre2-dev libtool libyaml-dev \
-            make pkg-config gcc g++ rustc zlib1g-dev file liblz4-dev
+            make pkg-config gcc g++ rustc zlib1g-dev file liblz4-dev ccache
+          
           # Optional: Hyperscan (x86_64 only)
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             sudo apt-get install -y libhyperscan-dev || true
@@ -94,7 +87,6 @@ jobs:
           # sanity:
           bash -lc '$CC --version || true'
 
-
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -108,7 +100,27 @@ jobs:
             echo "CPPFLAGS=-I$BREW_PREFIX/include $CPPFLAGS"
           } >> $GITHUB_ENV
 
-      # ---------- Versioning ----------
+      # -------- SBOM tools (Syft + optional CycloneDX CLI + Cosign) --------
+      - name: Install SBOM & signing tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Syft (lightweight install)
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          # Cosign (for keyless sign-blob)
+          curl -sSfL https://raw.githubusercontent.com/sigstore/cosign/main/install.sh | sh -s -- -b /usr/local/bin
+          # CycloneDX CLI is optional on Linux; skip if you prefer. Example (amd64 only):
+          # curl -sSfL https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.28.1/cyclonedx-linux-x64 \
+          #   -o /usr/local/bin/cyclonedx-cli && chmod +x /usr/local/bin/cyclonedx-cli || true
+
+      - name: Install SBOM & signing tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install syft cosign || true
+          
+          # Optional: more strict validation
+          brew install cyclonedx/cyclonedx/cyclonedx-cli || true
+
+      # -------- Versioning --------
       - name: Determine version string
         id: ver
         run: |
@@ -118,12 +130,13 @@ jobs:
           else
             RAW="$(git describe --tags --dirty --always || echo "untagged")"
           fi
+          
           # normalize: strip leading v for internal VER, keep RAW for display
           echo "RAW=$RAW" >> $GITHUB_ENV
           echo "VER=${RAW#v}-adorsys" >> $GITHUB_ENV
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      # ---------- Build from git ----------
+      # -------- build --------
       - name: Bootstrap (autotools)
         run: |
           # Suricata repo includes autogen.sh which runs autoreconf & friends
@@ -146,15 +159,46 @@ jobs:
           JOBS="$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)"
           make -j"$JOBS"
 
-      - name: Stage install & package
+      # -------- stage + SBOM + package --------
+      - name: Stage install & generate SBOM
         run: |
           DEST="$PWD/stage"
           make DESTDIR="$DEST" install
-          # bundle a small README with version info from your fork
+
+          # Metadata
           mkdir -p "$DEST/_meta"
-          printf "Suricata %s (%s)\nBuilt from %s@%s on %s\n" \
-             "${VER}" "${RAW}" "${{ github.repository }}" "${SHORT_SHA}" "$(date -u)" > "$DEST/_meta/BUILDINFO.txt"
-          tar czf "suricata-${VER}-${{ matrix.triplet }}.tar.gz" -C "$DEST" .
+          printf "Suricata %s (%s)\nBuilt from %s@%s on %s\nRunner: %s/%s\n" \
+            "${VER}" "${RAW}" "${{ github.repository }}" "${SHORT_SHA}" "$(date -u)" \
+            "${{ runner.os }}" "${{ matrix.arch }}" > "$DEST/_meta/BUILDINFO.txt"
+
+          # SBOM (CycloneDX JSON) from the staged install (what you actually ship)
+          syft "dir:$DEST" -o cyclonedx-json > "$DEST/_meta/sbom.cdx.json"
+
+          # Extra: also emit a standalone copy next to the tarball name
+          cp "$DEST/_meta/sbom.cdx.json" "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json"
+
+          # Optional: validate if cyclonedx-cli is present (non-fatal)
+          if command -v cyclonedx-cli >/dev/null 2>&1; then
+            cyclonedx-cli validate --input-file "$DEST/_meta/sbom.cdx.json" || exit 1
+          fi
+
+      - name: Create tarball + checksums
+        run: |
+          TAR="suricata-${VER}-${{ matrix.triplet }}.tar.gz"
+          tar czf "$TAR" -C "$PWD/stage" .
+          # checksums for both tarball and standalone SBOM
+          sha256sum "$TAR" > "${TAR}.sha256"
+          sha256sum "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json" > "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json.sha256"
+
+      # -------- optional signing (keyless) --------
+      - name: Cosign sign tarball & SBOM (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          COSIGN_YES: "true"
+        run: |
+          for f in "suricata-${VER}-${{ matrix.triplet }}.tar.gz" "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json"; do
+            cosign sign-blob "$f" --output-signature "$f.sig" --output-certificate "$f.pem"
+          done
 
       - name: Show build-info (sanity)
         run: |
@@ -164,26 +208,36 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: suricata-${{ env.VER }}-${{ matrix.triplet }}
-          path: suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz
+          path: |
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz.sha256
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz.sig
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz.pem
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.sbom.cdx.json
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.sbom.cdx.json.sha256
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.sbom.cdx.json.sig
+            suricata-${{ env.VER }}-${{ matrix.triplet }}.sbom.cdx.json.pem
           if-no-files-found: error
-          
-          #      - name: Dump config.log on failure
-          #        if: failure()
-          #        run: |
-          #          (test -f config.log && sed -n '1,200p' config.log) || true
-          #          find . -name config.log -maxdepth 2 -print -exec sed -n '1,120p' {} \;
-            
+         
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/download-artifact@v5
-      - name: Publish GitHub Release with binaries
+      - uses: actions/download-artifact@v4
+      - name: Publish GitHub Release with binaries + SBOMs
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
-          files: "**/*.tar.gz"
+          name: ${{ github.ref_name }} (from fork)
+          files: |
+            **/*.tar.gz
+            **/*.tar.gz.sha256
+            **/*.tar.gz.sig
+            **/*.tar.gz.pem
+            **/*.sbom.cdx.json
+            **/*.sbom.cdx.json.sha256
+            **/*.sbom.cdx.json.sig
+            **/*.sbom.cdx.json.pem
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
