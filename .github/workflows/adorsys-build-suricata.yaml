@@ -120,7 +120,7 @@ jobs:
           fi
           # normalize: strip leading v for internal VER, keep RAW for display
           echo "RAW=$RAW" >> $GITHUB_ENV
-          echo "VER=${RAW#v}" >> $GITHUB_ENV
+          echo "VER=${RAW#v}-adorsys" >> $GITHUB_ENV
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       # ---------- Build from git ----------
@@ -166,23 +166,23 @@ jobs:
           name: suricata-${{ env.VER }}-${{ matrix.triplet }}
           path: suricata-${{ env.VER }}-${{ matrix.triplet }}.tar.gz
           if-no-files-found: error
-
-      - name: Dump config.log on failure
-        if: failure()
-        run: |
-          (test -f config.log && sed -n '1,200p' config.log) || true
-          find . -name config.log -maxdepth 2 -print -exec sed -n '1,120p' {} \;
           
+          #      - name: Dump config.log on failure
+          #        if: failure()
+          #        run: |
+          #          (test -f config.log && sed -n '1,200p' config.log) || true
+          #          find . -name config.log -maxdepth 2 -print -exec sed -n '1,120p' {} \;
+            
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
       - name: Publish GitHub Release with binaries
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }} (from fork)
+          name: ${{ github.ref_name }}
           files: "**/*.tar.gz"
           generate_release_notes: true
         env:
