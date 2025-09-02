@@ -133,7 +133,7 @@ jobs:
           
           # normalize: strip leading v for internal VER, keep RAW for display
           echo "RAW=$RAW" >> $GITHUB_ENV
-          echo "VER=${RAW#v}-adorsys" >> $GITHUB_ENV
+          echo "VER=${RAW#v}" >> $GITHUB_ENV
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       # -------- build --------
