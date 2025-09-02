@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write
-  id-token: write   # needed for cosign keyless
+  id-token: write
 
 jobs:
   build:
@@ -74,7 +74,7 @@ jobs:
             sudo apt-get install -y libhyperscan-dev || true
           fi
 
-      - name: Enable ccache (if present) – no quotes!
+      - name: Enable ccache (Linux) – no quotes
         if: runner.os == 'Linux'
         run: |
           if command -v ccache >/dev/null 2>&1; then
@@ -100,25 +100,9 @@ jobs:
             echo "CPPFLAGS=-I$BREW_PREFIX/include $CPPFLAGS"
           } >> $GITHUB_ENV
 
-      # -------- SBOM tools (Syft + optional CycloneDX CLI + Cosign) --------
-      - name: Install SBOM & signing tools (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          # Syft (lightweight install)
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          # Cosign (for keyless sign-blob)
-          curl -sSfL https://raw.githubusercontent.com/sigstore/cosign/main/install.sh | sh -s -- -b /usr/local/bin
-          # CycloneDX CLI is optional on Linux; skip if you prefer. Example (amd64 only):
-          # curl -sSfL https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.28.1/cyclonedx-linux-x64 \
-          #   -o /usr/local/bin/cyclonedx-cli && chmod +x /usr/local/bin/cyclonedx-cli || true
-
-      - name: Install SBOM & signing tools (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install syft cosign || true
-          
-          # Optional: more strict validation
-          brew install cyclonedx/cyclonedx/cyclonedx-cli || true
+      # ---- SBOM/signing tools via actions ----
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
 
       # -------- Versioning --------
       - name: Determine version string
@@ -151,16 +135,12 @@ jobs:
             --localstatedir=/var
 
       - name: Build
-        env:
-          # Enable ccache if set
-          CC: ${{ env.CC }}
-          CXX: ${{ env.CXX }}
         run: |
           JOBS="$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)"
           make -j"$JOBS"
 
       # -------- stage + SBOM + package --------
-      - name: Stage install & generate SBOM
+      - name: Stage install & metadata
         run: |
           DEST="$PWD/stage"
           make DESTDIR="$DEST" install
@@ -171,26 +151,30 @@ jobs:
             "${VER}" "${RAW}" "${{ github.repository }}" "${SHORT_SHA}" "$(date -u)" \
             "${{ runner.os }}" "${{ matrix.arch }}" > "$DEST/_meta/BUILDINFO.txt"
 
-          # SBOM (CycloneDX JSON) from the staged install (what you actually ship)
-          syft "dir:$DEST" -o cyclonedx-json > "$DEST/_meta/sbom.cdx.json"
+      # ---- SBOM (CycloneDX) with Syft action ----
+      - name: Generate SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@v0.17.2
+        with:
+          path: ./stage
+          format: cyclonedx-json
+          output-file: suricata-${{ env.VER }}-${{ matrix.triplet }}.sbom.cdx.json
 
-          # Extra: also emit a standalone copy next to the tarball name
-          cp "$DEST/_meta/sbom.cdx.json" "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json"
+      - name: Embed SBOM inside staged tree
+        run: |
+          mkdir -p stage/_meta
+          cp "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json" "stage/_meta/sbom.cdx.json"
 
-          # Optional: validate if cyclonedx-cli is present (non-fatal)
-          if command -v cyclonedx-cli >/dev/null 2>&1; then
-            cyclonedx-cli validate --input-file "$DEST/_meta/sbom.cdx.json" || exit 1
-          fi
-
+      # -------- package + checksums --------
       - name: Create tarball + checksums
         run: |
           TAR="suricata-${VER}-${{ matrix.triplet }}.tar.gz"
           tar czf "$TAR" -C "$PWD/stage" .
+          
           # checksums for both tarball and standalone SBOM
           sha256sum "$TAR" > "${TAR}.sha256"
           sha256sum "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json" > "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json.sha256"
 
-      # -------- optional signing (keyless) --------
+      # -------- signing (keyless) --------
       - name: Cosign sign tarball & SBOM (keyless)
         env:
           COSIGN_EXPERIMENTAL: "true"
@@ -204,7 +188,7 @@ jobs:
         run: |
           ./src/suricata --build-info || true
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: suricata-${{ env.VER }}-${{ matrix.triplet }}
