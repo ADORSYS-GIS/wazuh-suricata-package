@@ -172,8 +172,13 @@ jobs:
           tar czf "$TAR" -C "$PWD/stage" .
           
           # checksums for both tarball and standalone SBOM
-          gsha256sum "$TAR" > "${TAR}.sha256"
-          gsha256sum "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json" > "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json.sha256"
+          if command -v gsha256sum >/dev/null 2>&1; then
+            gsha256sum "$TAR" > "${TAR}.sha256"
+            gsha256sum "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json" > "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json.sha256"
+          else
+            sha256sum "$TAR" > "${TAR}.sha256"
+            sha256sum "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json" > "suricata-${VER}-${{ matrix.triplet }}.sbom.cdx.json.sha256"
+          fi
 
       # -------- signing (keyless) --------
       - name: Cosign sign tarball & SBOM (keyless)
