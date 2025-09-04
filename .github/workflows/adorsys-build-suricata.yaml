@@ -143,7 +143,7 @@ jobs:
       - name: Stage install & metadata
         run: |
           DEST="$PWD/stage"
-          make DESTDIR="$DEST" install
+          make DESTDIR="$DEST" install-full
 
           # Metadata
           mkdir -p "$DEST/_meta"
