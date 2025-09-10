@@ -48,7 +48,8 @@ jobs:
           fetch-depth: 0
           submodules: false
 
-      - name: Init submodules
+      - name: Init submodules (non-container)
+        if: '!matrix.container'
         run: git submodule update --init --recursive
 
       # -------- caches --------
@@ -135,6 +136,10 @@ jobs:
           echo "CXX=g++" >> $GITHUB_ENV
           # sanity:
           gcc --version || true
+
+      - name: Init submodules (container)
+        if: matrix.container
+        run: git submodule update --init --recursive
 
       - name: Install build deps (macOS)
         if: runner.os == 'macOS'
