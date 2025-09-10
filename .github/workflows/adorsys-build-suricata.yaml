@@ -16,6 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-22.04
+            arch: amd64
+            triplet: linux-amd64-ubuntu22
           - os: ubuntu-24.04
             arch: amd64
             triplet: linux-amd64
